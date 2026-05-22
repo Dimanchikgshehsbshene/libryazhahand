@@ -227,6 +227,29 @@ namespace ult {
      * @param path The input path string to preprocess, passed by reference.
      * @param packagePath The base package path to resolve relative paths against.
      */
+    // Resolves "./" and "../" sequences in a path in-place without adding "sdmc:" prefix.
+    // Declared in string_funcs.hpp; used by callers that need raw path normalisation.
+    void resolveDirectoryTraversal(std::string& path) {
+        // Strip leading "./"
+        while (path.length() >= 2 && path[0] == '.' && path[1] == '/') {
+            path.erase(0, 2);
+        }
+
+        // Resolve "../" sequences iteratively
+        size_t dotDotPos;
+        while ((dotDotPos = path.find("../")) != std::string::npos) {
+            size_t searchEnd = dotDotPos;
+            if (searchEnd > 0 && path[searchEnd - 1] == '/') --searchEnd;
+
+            const size_t lastSlash = (searchEnd > 0) ? path.rfind('/', searchEnd - 1) : std::string::npos;
+            if (lastSlash != std::string::npos) {
+                path.erase(lastSlash + 1, dotDotPos + 3 - lastSlash - 1);
+            } else {
+                path.erase(0, dotDotPos + 3);
+            }
+        }
+    }
+
     void preprocessPath(std::string& path, const std::string& packagePath) {
         removeQuotes(path);
         

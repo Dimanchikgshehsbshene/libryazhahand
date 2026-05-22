@@ -28,7 +28,7 @@ namespace ult {
 
     std::atomic<int> copyPercentage(-1);
     
-    std::mutex logMutex2; // Mutex for thread-safe logging (defined here, declared as extern in header)
+    std::mutex logMutex; // Mutex for thread-safe logging (defined here, declared as extern in header)
 
     static std::vector<std::string> fileList;
 
@@ -159,7 +159,7 @@ namespace ult {
     
     void writeLog(FILE* logFile, const std::string& line) {
         if (logFile) {
-            std::lock_guard<std::mutex> lock(logMutex2);
+            std::lock_guard<std::mutex> lock(logMutex);
             fprintf(logFile, "%s\n", line.c_str());
             fflush(logFile); // Ensure data is written immediately
         } else {

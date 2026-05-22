@@ -132,34 +132,29 @@ namespace ult {
      * @return The corresponding decimal string.
      */
     std::string hexToDecimal(const std::string& hexStr) {
-        // Convert hexadecimal string to integer
-        int decimalValue = 0;
+        unsigned long long decimalValue = 0;
         const size_t len = hexStr.length();
-        
-        char hexChar;
-        int value;
 
-        // Iterate over each character in the hexadecimal string
         for (size_t i = 0; i < len; ++i) {
-            hexChar = hexStr[i];
-            
-            // Convert hex character to its decimal value
+            const char hexChar = hexStr[i];
+            unsigned int digit;
+
             if (hexChar >= '0' && hexChar <= '9') {
-                value = hexChar - '0';
+                digit = static_cast<unsigned int>(hexChar - '0');
             } else if (hexChar >= 'A' && hexChar <= 'F') {
-                value = 10 + (hexChar - 'A');
+                digit = static_cast<unsigned int>(10 + (hexChar - 'A'));
             } else if (hexChar >= 'a' && hexChar <= 'f') {
-                value = 10 + (hexChar - 'a');
+                digit = static_cast<unsigned int>(10 + (hexChar - 'a'));
             } else {
                 break;
             }
-    
-            // Update the decimal value
-            decimalValue = decimalValue * 16 + value;
+
+            decimalValue = decimalValue * 16u + digit;
         }
-    
-        // Convert the decimal value to a string
-        return ult::to_string(decimalValue);
+
+        char buf[24];
+        snprintf(buf, sizeof(buf), "%llu", decimalValue);
+        return std::string(buf);
     }
     
     
@@ -239,64 +234,59 @@ namespace ult {
         const unsigned char* patternPtr = binaryData.get();
         const unsigned char firstByte = patternPtr[0];
         
-        // Use heap allocation for the buffer to avoid stack overflow with large buffer sizes
-        std::unique_ptr<unsigned char[]> buffer(new unsigned char[HEX_BUFFER_SIZE]);
-        size_t bytesRead = 0;
-        size_t offset = 0;
-        size_t i = 0;
-        
-
-        while ((bytesRead = fread(buffer.get(), 1, HEX_BUFFER_SIZE, file)) > 0) {
-            const unsigned char* bufPtr = buffer.get();
-            
-            // Optimized search with first-byte filtering and loop unrolling
-            i = 0;
-            const size_t searchEnd = bytesRead;
-            
-            // Process 4 bytes at a time for better cache usage
-            for (; i + 4 <= searchEnd; i += 4) {
-                // Check 4 positions at once
-                if (bufPtr[i] == firstByte) {
-                    if (offset + i + patternLen <= fileSize && 
-                        memcmp(bufPtr + i, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i));
-                    }
-                }
-                if (bufPtr[i + 1] == firstByte) {
-                    if (offset + i + 1 + patternLen <= fileSize && 
-                        memcmp(bufPtr + i + 1, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i + 1));
-                    }
-                }
-                if (bufPtr[i + 2] == firstByte) {
-                    if (offset + i + 2 + patternLen <= fileSize && 
-                        memcmp(bufPtr + i + 2, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i + 2));
-                    }
-                }
-                if (bufPtr[i + 3] == firstByte) {
-                    if (offset + i + 3 + patternLen <= fileSize && 
-                        memcmp(bufPtr + i + 3, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i + 3));
-                    }
-                }
-            }
-            
-            // Handle remaining bytes
-            for (; i < searchEnd; ++i) {
-                if (bufPtr[i] == firstByte) {
-                    if (offset + i + patternLen <= fileSize && 
-                        memcmp(bufPtr + i, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i));
-                    }
-                }
-            }
-            
-            offset += bytesRead;
+        if (patternLen == 0) {
+            fclose(file);
+            return offsets;
         }
-    
+
+        // Overlap buffer: keeps patternLen-1 bytes from the previous chunk so patterns
+        // that span two reads are never missed. Also prevents memcmp from reading past
+        // the end of the buffer (the old code had a latent OOB read).
+        const size_t overlapSize = (patternLen > 1) ? patternLen - 1 : 0;
+        const size_t bufCapacity  = HEX_BUFFER_SIZE + overlapSize;
+        std::unique_ptr<unsigned char[]> buffer(new unsigned char[bufCapacity]);
+
+        size_t bufFileOffset = 0; // file offset of buffer[0]
+        size_t bufFilled     = 0; // valid bytes currently in buffer
+
+        while (true) {
+            const size_t toRead  = std::min(HEX_BUFFER_SIZE, bufCapacity - bufFilled);
+            const size_t bytesRead = fread(buffer.get() + bufFilled, 1, toRead, file);
+            bufFilled += bytesRead;
+
+            if (bufFilled < patternLen) break;
+
+            const unsigned char* bufPtr  = buffer.get();
+            // searchEnd: last starting position where a full pattern still fits
+            const size_t searchEnd = bufFilled - patternLen + 1;
+            size_t i = 0;
+
+            for (; i + 4 <= searchEnd; i += 4) {
+                if (bufPtr[i]   == firstByte && memcmp(bufPtr + i,     patternPtr, patternLen) == 0)
+                    offsets.emplace_back(ult::to_string(bufFileOffset + i));
+                if (bufPtr[i+1] == firstByte && memcmp(bufPtr + i + 1, patternPtr, patternLen) == 0)
+                    offsets.emplace_back(ult::to_string(bufFileOffset + i + 1));
+                if (bufPtr[i+2] == firstByte && memcmp(bufPtr + i + 2, patternPtr, patternLen) == 0)
+                    offsets.emplace_back(ult::to_string(bufFileOffset + i + 2));
+                if (bufPtr[i+3] == firstByte && memcmp(bufPtr + i + 3, patternPtr, patternLen) == 0)
+                    offsets.emplace_back(ult::to_string(bufFileOffset + i + 3));
+            }
+            for (; i < searchEnd; ++i) {
+                if (bufPtr[i] == firstByte && memcmp(bufPtr + i, patternPtr, patternLen) == 0)
+                    offsets.emplace_back(ult::to_string(bufFileOffset + i));
+            }
+
+            if (bytesRead == 0) break; // EOF – all data processed
+
+            // Slide window: keep last overlapSize bytes for next iteration
+            const size_t advance = searchEnd; // == bufFilled - overlapSize
+            if (overlapSize > 0 && advance > 0)
+                memmove(buffer.get(), buffer.get() + advance, overlapSize);
+            bufFileOffset += advance;
+            bufFilled      = overlapSize;
+        }
+
         fclose(file);
-    
         return offsets;
     }
 
@@ -657,40 +647,44 @@ namespace ult {
      * @return The version string if found; otherwise, an empty string.
      */
     std::string extractVersionFromBinary(const std::string &filePath) {
-        // Step 1: Open the binary file
         FILE* file = fopen(filePath.c_str(), "rb");
-        if (!file) {
-            return ""; // Return empty string if file cannot be opened
-        }
-    
-        // Get the file size
-        fseek(file, 0, SEEK_END);
-        const std::streamsize size = ftell(file);
-        fseek(file, 0, SEEK_SET);
-    
-        // Read the entire file into a buffer
-        std::vector<uint8_t> buffer(size);
-        const size_t bytesRead = fread(buffer.data(), sizeof(uint8_t), size, file);
-        fclose(file); // Close the file after reading
-        
-        if (bytesRead != static_cast<size_t>(size)) {
-            return ""; // Return empty string if reading fails
-        }
-    
-        // Step 2: Search for the pattern "v#.#.#"
-        const char* data = reinterpret_cast<const char*>(buffer.data());
-        for (std::streamsize i = 0; i < size; ++i) {
-            if (data[i] == 'v' && i + 5 < size && 
-                std::isdigit(data[i + 1]) && data[i + 2] == '.' && 
-                std::isdigit(data[i + 3]) && data[i + 4] == '.' && 
-                std::isdigit(data[i + 5])) {
-    
-                // Extract the version string
-                return std::string(data + i, 6); // Return the version string
+        if (!file) return "";
+
+        // Streaming search: read in small chunks with a 5-byte overlap so "v#.#.#"
+        // patterns that span a chunk boundary are never missed. This avoids loading
+        // the entire binary into memory (binaries can be several MB).
+        static constexpr size_t CHUNK = 4096;
+        static constexpr size_t OVERLAP = 5; // len("v#.#.#") - 1
+        char buf[CHUNK + OVERLAP];
+
+        size_t prevOverlap = 0;
+
+        while (true) {
+            const size_t bytesRead = fread(buf + prevOverlap, 1, CHUNK, file);
+            const size_t total = prevOverlap + bytesRead;
+
+            if (total < 6) break; // can't fit the pattern
+
+            const size_t searchEnd = total - 5; // last position where all 6 chars fit
+            for (size_t i = 0; i < searchEnd; ++i) {
+                if (buf[i] == 'v' &&
+                    std::isdigit(static_cast<unsigned char>(buf[i+1])) && buf[i+2] == '.' &&
+                    std::isdigit(static_cast<unsigned char>(buf[i+3])) && buf[i+4] == '.' &&
+                    std::isdigit(static_cast<unsigned char>(buf[i+5]))) {
+                    fclose(file);
+                    return std::string(buf + i, 6);
+                }
             }
+
+            if (bytesRead == 0) break; // EOF
+
+            // Preserve overlap for next iteration
+            memmove(buf, buf + total - OVERLAP, OVERLAP);
+            prevOverlap = OVERLAP;
         }
-    
-        return "";  // Return empty string if no match is found
+
+        fclose(file);
+        return "";
     }
 
     // 1. Table optimization: Mark as constexpr for compile-time evaluation
