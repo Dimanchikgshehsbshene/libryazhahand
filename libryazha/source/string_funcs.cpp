@@ -113,7 +113,7 @@ namespace ult {
     StringStream& StringStream::operator<<(int input) {
         if (hexMode) {
             char buffer[20];  // Buffer large enough for hex conversion
-            sprintf(buffer, "%x", input);  // Convert integer to hex string
+            snprintf(buffer, sizeof(buffer), "%x", input);  // Convert integer to hex string
             data += buffer;
         } else {
             data += ult::to_string(input);
@@ -217,6 +217,24 @@ namespace ult {
     }
     
     
+    void resolveDirectoryTraversal(std::string& path) {
+        size_t dotDotPos;
+        size_t searchEnd;
+        while ((dotDotPos = path.find("../")) != std::string::npos) {
+            searchEnd = dotDotPos;
+            if (searchEnd > 0 && path[searchEnd - 1] == '/') {
+                --searchEnd;
+            }
+            const size_t lastSlash = (searchEnd > 0) ? path.rfind('/', searchEnd - 1) : std::string::npos;
+            if (lastSlash != std::string::npos) {
+                path.erase(lastSlash + 1, dotDotPos + 3 - lastSlash - 1);
+            } else {
+                path.erase(0, dotDotPos);
+                path.insert(0, "/");
+            }
+        }
+    }
+
     /**
      * @brief Preprocesses a path string by replacing multiple slashes and adding "sdmc:" prefix.
      *

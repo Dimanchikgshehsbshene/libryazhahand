@@ -227,76 +227,79 @@ namespace ult {
             fclose(file);
             return offsets;
         }
-        
+
         const size_t hexLen = hexData.length();
         const size_t patternLen = hexLen / 2;
-        
+
+        if (patternLen == 0 || patternLen > fileSize) {
+            fclose(file);
+            return offsets;
+        }
+
         // Use heap allocation for the buffer to avoid stack overflow with large buffer sizes
         std::unique_ptr<unsigned char[]> binaryData(new unsigned char[patternLen]);
         hexStringToBinary(reinterpret_cast<const unsigned char*>(hexData.c_str()), hexLen, binaryData.get());
-    
+
         // Optimized search variables
         const unsigned char* patternPtr = binaryData.get();
         const unsigned char firstByte = patternPtr[0];
-        
-        // Use heap allocation for the buffer to avoid stack overflow with large buffer sizes
-        std::unique_ptr<unsigned char[]> buffer(new unsigned char[HEX_BUFFER_SIZE]);
-        size_t bytesRead = 0;
-        size_t offset = 0;
-        size_t i = 0;
-        
 
-        while ((bytesRead = fread(buffer.get(), 1, HEX_BUFFER_SIZE, file)) > 0) {
+        // Overlap size ensures patterns spanning buffer boundaries are never missed
+        const size_t overlapSize = patternLen - 1;
+
+        // Buffer holds HEX_BUFFER_SIZE new bytes plus overlap from previous iteration
+        std::unique_ptr<unsigned char[]> buffer(new unsigned char[HEX_BUFFER_SIZE + overlapSize]);
+
+        size_t fileReadPos = 0;  // file position of the next byte to read
+        size_t prevOverlap = 0;  // bytes from previous iteration held at start of buffer
+
+        while (true) {
+            const size_t bytesRead = fread(buffer.get() + prevOverlap, 1, HEX_BUFFER_SIZE, file);
+            if (bytesRead == 0) break;
+
+            const size_t totalInBuffer = prevOverlap + bytesRead;
+            // File position of buffer[0]
+            const size_t bufStartPos = fileReadPos - prevOverlap;
             const unsigned char* bufPtr = buffer.get();
-            
-            // Optimized search with first-byte filtering and loop unrolling
-            i = 0;
-            const size_t searchEnd = bytesRead;
-            
+
+            // Only search positions where the full pattern fits within totalInBuffer
+            const size_t searchEnd = totalInBuffer >= patternLen ? totalInBuffer - patternLen + 1 : 0;
+
+            size_t i = 0;
             // Process 4 bytes at a time for better cache usage
             for (; i + 4 <= searchEnd; i += 4) {
-                // Check 4 positions at once
-                if (bufPtr[i] == firstByte) {
-                    if (offset + i + patternLen <= fileSize && 
-                        memcmp(bufPtr + i, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i));
-                    }
+                if (bufPtr[i] == firstByte && memcmp(bufPtr + i, patternPtr, patternLen) == 0) {
+                    offsets.emplace_back(ult::to_string(bufStartPos + i));
                 }
-                if (bufPtr[i + 1] == firstByte) {
-                    if (offset + i + 1 + patternLen <= fileSize && 
-                        memcmp(bufPtr + i + 1, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i + 1));
-                    }
+                if (bufPtr[i + 1] == firstByte && memcmp(bufPtr + i + 1, patternPtr, patternLen) == 0) {
+                    offsets.emplace_back(ult::to_string(bufStartPos + i + 1));
                 }
-                if (bufPtr[i + 2] == firstByte) {
-                    if (offset + i + 2 + patternLen <= fileSize && 
-                        memcmp(bufPtr + i + 2, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i + 2));
-                    }
+                if (bufPtr[i + 2] == firstByte && memcmp(bufPtr + i + 2, patternPtr, patternLen) == 0) {
+                    offsets.emplace_back(ult::to_string(bufStartPos + i + 2));
                 }
-                if (bufPtr[i + 3] == firstByte) {
-                    if (offset + i + 3 + patternLen <= fileSize && 
-                        memcmp(bufPtr + i + 3, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i + 3));
-                    }
+                if (bufPtr[i + 3] == firstByte && memcmp(bufPtr + i + 3, patternPtr, patternLen) == 0) {
+                    offsets.emplace_back(ult::to_string(bufStartPos + i + 3));
                 }
             }
-            
-            // Handle remaining bytes
             for (; i < searchEnd; ++i) {
-                if (bufPtr[i] == firstByte) {
-                    if (offset + i + patternLen <= fileSize && 
-                        memcmp(bufPtr + i, patternPtr, patternLen) == 0) {
-                        offsets.emplace_back(ult::to_string(offset + i));
-                    }
+                if (bufPtr[i] == firstByte && memcmp(bufPtr + i, patternPtr, patternLen) == 0) {
+                    offsets.emplace_back(ult::to_string(bufStartPos + i));
                 }
             }
-            
-            offset += bytesRead;
+
+            fileReadPos += bytesRead;
+
+            // Carry overlap into next iteration only if more data expected
+            if (bytesRead < HEX_BUFFER_SIZE) break;  // reached EOF
+
+            prevOverlap = (overlapSize < totalInBuffer) ? overlapSize : totalInBuffer;
+            if (prevOverlap > 0) {
+                memmove(buffer.get(), buffer.get() + totalInBuffer - prevOverlap, prevOverlap);
+            }
         }
-    
+
         fclose(file);
-    
+
         return offsets;
     }
 
@@ -402,6 +405,7 @@ namespace ult {
         }
         
         if (hexSum == -1) {
+            if (customAsciiPattern.empty()) return;
             std::string customHexPattern;
             if (customAsciiPattern[0] == '#') {
                 // remove #
@@ -607,9 +611,11 @@ namespace ult {
         const std::string searchString = "{hex_file(";
         
         const size_t startPos = replacement.find(searchString);
-        const size_t endPos = replacement.find(")}");
-        
-        if (startPos != std::string::npos && endPos != std::string::npos && endPos > startPos) {
+        if (startPos == std::string::npos) return replacement;
+
+        const size_t endPos = replacement.find(")}", startPos + searchString.length());
+
+        if (endPos != std::string::npos) {
             const std::string placeholderContent = replacement.substr(startPos + searchString.length(), endPos - startPos - searchString.length());
             
             // Split the placeholder content into its components (customAsciiPattern, offsetStr, length)
@@ -635,8 +641,9 @@ namespace ult {
                 
                 // Only replace if parsedResult returns a non-empty string
                 if (!parsedResult.empty()) {
-                    // Replace the entire placeholder with the parsed result
-                    replacement.replace(startPos, endPos - startPos + searchString.length() + 2, parsedResult);
+                    // Replace the entire placeholder {hex_file(...)} with the parsed result
+                    // endPos points to ')' in ')}', so placeholder span is [startPos, endPos+2)
+                    replacement.replace(startPos, endPos + 2 - startPos, parsedResult);
                 }
             }
         }

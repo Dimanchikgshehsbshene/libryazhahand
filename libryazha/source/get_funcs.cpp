@@ -109,7 +109,7 @@ namespace ult {
      */
     std::string getFileName(const std::string& path) {
         const size_t pos = path.find_last_of('/');
-        return (pos != std::string::npos) ? path.substr(pos + 1) : "";
+        return (pos != std::string::npos) ? path.substr(pos + 1) : path;
     }
     
     
@@ -141,8 +141,9 @@ namespace ult {
         if (start == std::string::npos) start = 0;
         else start += 1;
     
-        // OPTIMIZATION 1: Use find_first_of instead of manual loop - much faster
-        const bool hasWhitespace = (path.find_first_of(" \t\n\r\f\v", start, pos - start) != std::string::npos);
+        // Search for whitespace only within [start, pos)
+        const size_t foundWS = path.find_first_of(" \t\n\r\f\v", start);
+        const bool hasWhitespace = (foundWS != std::string::npos && foundWS < pos);
     
         if (hasWhitespace) {
             // OPTIMIZATION 2: Pre-allocate exact size and build efficiently
